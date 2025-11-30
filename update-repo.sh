@@ -17,6 +17,10 @@ BASE_URL="https://github.com/racket"
 echo "Updating repositories..."
 echo "========================"
 
+# Create temp directory once
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
+
 for REPO_NAME in "$@"; do
     echo ""
     echo "Updating: $REPO_NAME"
@@ -28,10 +32,6 @@ for REPO_NAME in "$@"; do
         echo "Use integrate-repos.sh to add new repositories"
         continue
     fi
-    
-    # Create temp directory
-    TEMP_DIR=$(mktemp -d)
-    trap "rm -rf $TEMP_DIR" EXIT
     
     # Clone fresh copy
     echo "Cloning latest version..."
