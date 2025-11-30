@@ -1,0 +1,25 @@
+on: [push, pull_request]
+name: CI
+jobs:
+  build:
+    name: "Build on Racket '${{ matrix.racket-version }}' (${{ matrix.racket-variant }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        racket-version: ["8.0", "8.1", "8.16", "8.17", "current"]
+        racket-variant: ["BC", "CS"]
+        exclude:
+          - racket-variant: BC
+            racket-version: current
+    steps:
+      - uses: actions/checkout@master
+      - uses: Bogdanp/setup-racket@v1.14
+        with:
+          architecture: x64
+          distribution: full
+          variant: ${{ matrix.racket-variant }}
+          version: ${{ matrix.racket-version }}
+      - run: sudo raco pkg update --name web-server-lib --link --batch --auto web-server-lib/
+      - run: sudo raco pkg install --batch --auto web-server-test/
+      - run: raco test --drdr web-server-test/

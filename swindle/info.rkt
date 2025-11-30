@@ -1,0 +1,54 @@
+;;; Written by Eli Barzilay: Maze is Life!  (eli@barzilay.org)
+#lang info
+
+(define collection "swindle")
+
+(define mzscheme-launcher-names '("swindle"))
+(define mzscheme-launcher-flags '(("-li" "swindle")))
+
+(define scribblings '(("swindle.scrbl" () (language))))
+
+;; This simple interface is not enough, use tool.rkt instead
+;; (define drscheme-language-modules
+;;   '(("swindle.rkt" "swindle")
+;;     ("turbo.rkt" "swindle")
+;;     ("html.rkt" "swindle")))
+;; (define drscheme-language-positions
+;;   '(("Swindle" "Full Swindle")
+;;     ("Swindle" "Swindle without CLOS")
+;;     ("Swindle" "HTML Swindle")))
+;; (define drscheme-language-numbers
+;;   '((-900 0) (-900 1) (-900 2)))
+;; (define drscheme-language-one-line-summaries
+;;   '("Scheme with Full Swindle extensions"
+;;     "Scheme with Swindle without the object system"
+;;     "Scheme with the HTML and Swindle extensions"))
+;; (define drscheme-language-urls
+;;   '("https://docs.racket-lang.org/swindle/"
+;;     "https://docs.racket-lang.org/swindle/"
+;;     "https://docs.racket-lang.org/swindle/"))
+
+(define tools      '(("tool.rkt")))
+(define tool-names '("Swindle"))
+(define tool-icons '(("swindle-icon.png" "swindle")))
+(define tool-urls  '("https://docs.racket-lang.org/swindle/"))
+(define deps '("scheme-lib"
+               "base"
+               "compatibility-lib"
+               "drracket-plugin-lib"
+               "gui-lib"
+	       "net-lib"
+               "string-constants-lib"))
+(define build-deps '("compatibility-doc"
+                     "racket-doc"
+                     "scribble-lib"))
+
+(define pkg-desc "The implementation of the Swindle language")
+
+(define pkg-authors '(eli))
+
+(define license
+  ;; TODO: Update this if https://github.com/spdx/license-list-XML/pull/1346
+  ;; concludes that the Tiny CLOS license should be assigned a different
+  ;; license rather than Xerox.
+  '(Xerox AND (Apache-2.0 OR MIT)))
