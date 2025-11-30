@@ -19,7 +19,7 @@ echo "========================"
 
 # Create temp directory once
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+trap 'rm -rf "$TEMP_DIR"' EXIT
 
 for REPO_NAME in "$@"; do
     echo ""

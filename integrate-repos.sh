@@ -21,7 +21,7 @@ echo ""
 
 # Create a temporary directory for cloning
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+trap 'rm -rf "$TEMP_DIR"' EXIT
 
 # Read repos from config file (skip comments and empty lines)
 while IFS= read -r line || [ -n "$line" ]; do
