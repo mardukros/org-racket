@@ -1,0 +1,2148 @@
+#lang racket/base
+
+  (require "private/drracket-test-util.rkt"
+           drracket/private/syncheck/local-member-names
+           drracket/syncheck-drracket-button
+           string-constants/string-constant
+           "private/gui.rkt"
+           racket/path
+           racket/class
+           racket/list
+           racket/file
+           racket/set
+           racket/port
+           racket/pretty
+           racket/gui/base
+           framework
+           mrlib/text-string-style-desc
+           (for-syntax racket/base))
+  
+  (provide main)
+  
+  ;; type str/ann = (list (union symbol string) symbol)
+  ;; type test = (make-test string
+  ;;                        (or/c (-> any (listof str/ann)) 
+  ;;                              (listof str/ann))
+  ;;                               -- if proc, then pass in result of setup thunk
+  ;;                        (listof (cons (list number number) (listof (list number number)))))
+  ;;                        (listof (list number number) (listof string)))
+  ;;                        (-> any)
+  ;;                        (any -> void?)  -- argument is the result of the setup thunk
+  (define-struct test (line input expected arrows tooltips setup teardown extra-files extra-info?)
+    #:transparent)
+  (define-struct (dir-test test) () #:transparent)
+
+  ;; When either `new-name` or `output` is `#f`, only test that `old-name` is on the menu
+  (define-struct rename-test (line input pos old-name new-name output) #:transparent)
+  (define-struct prefix-test (line input pos prefix output) #:transparent)
+  (define-struct err-test (line input expected locations) #:transparent)
+  
+  (define (build-test/proc line
+                           input
+                           expected
+                           [arrow-table '()]
+                           #:tooltips [tooltips #f]
+                           #:setup [setup void]
+                           #:teardown [teardown void]
+                           #:extra-files [extra-files (hash)]
+                           #:extra-info? [extra-info? #f])
+    (make-test line input expected arrow-table tooltips setup teardown extra-files extra-info?))
+  
+  (define-syntax (build-test stx)
+    (syntax-case stx ()
+      [(_ args ...)
+       (with-syntax ([line (syntax-line stx)])
+         #'(build-test/proc line args ...))]))
+  
+  (define-syntax (build-rename-test stx)
+    (syntax-case stx ()
+      [(_ args ...)
+       (with-syntax ([line (syntax-line stx)])
+         #'(rename-test line args ...))]))
+
+  (define-syntax (build-prefix-test stx)
+    (syntax-case stx ()
+      [(_ args ...)
+       (with-syntax ([line (syntax-line stx)])
+         #'(prefix-test line args ...))]))
+  
+  (define-syntax (build-dir-test stx)
+    (syntax-case stx ()
+      [(_ args ...)
+       (with-syntax ([line (syntax-line stx)])
+         ;; #f is for the tooltip portion of the test, just skip 'em
+         #'(make-dir-test line args ... #f void void (hash) #f))]))
+
+  (define-syntax (build-err-test stx)
+    (syntax-case stx ()
+      [(_ input expected locations)
+       (with-syntax ([line (syntax-line stx)])
+         ;; #f is for the tooltip portion of the test, just skip 'em
+         #'(make-err-test line input expected locations))]))
+  
+  ;; tests : (listof test)
+  (define tests
+    (list
+
+     (build-test "12345"
+                '(("12345" constant)))
+     (build-test "'abcdef"
+                '(("'" imported-syntax)
+                  ("abcdef" constant)))
+     (build-test "(define f 1)"
+                '(("("      default-color)
+                  ("define" imported-syntax)
+                  (" "      default-color)
+                  ("f"      lexically-bound)
+                  (" "      default-color)
+                  ("1"      constant)
+                  (")"      default-color)))
+     (build-test "(lambda (x) x)"
+                '(("("      default-color)
+                  ("lambda" imported-syntax)
+                  (" ("     default-color)
+                  ("x"      lexically-bound-variable)
+                  (") "     default-color)
+                  ("x"      lexically-bound-variable)
+                  (")"      default-color))
+                (list '((9 10) (12 13)))
+                #:tooltips '((9 10 "1 bound occurrence")))
+     (build-test "(lambda (🏴‍☠️) 🏴‍☠️)"
+                '(("("      default-color)
+                  ("lambda" imported-syntax)
+                  (" ("     default-color)
+                  ("🏴‍☠️"      lexically-bound-variable)
+                  (") "     default-color)
+                  ("🏴‍☠️"      lexically-bound-variable)
+                  (")"      default-color))
+                (list '((9 13) (15 19)))
+                #:tooltips '((9 13 "1 bound occurrence")))
+     (build-test "(lambda x x)"
+                '(("("      default-color)
+                  ("lambda" imported-syntax)
+                  (" "      default-color)
+                  ("x"      lexically-bound-variable)
+                  (" "      default-color)
+                  ("x"      lexically-bound-variable)
+                  (")"      default-color))
+                (list '((8 9) (10 11))))
+     (build-test "(lambda (x . y) x y)"
+                '(("("      default-color)
+                  ("lambda" imported-syntax)
+                  (" ("     default-color)
+                  ("x"      lexically-bound-variable)
+                  (" . "    default-color)
+                  ("y"      lexically-bound-variable)
+                  (") "     default-color)
+                  ("x"      lexically-bound-variable)
+                  (" "      default-color)
+                  ("y"      lexically-bound-variable)
+                  (")"      default-color))
+                (list '((9 10) (16 17))
+                      '((13 14) (18 19))))
+     
+     (build-test "(case-lambda [(x) x])"
+                 '(("("           default-color)
+                   ("case-lambda" imported-syntax)
+                   (" [("         default-color)
+                   ("x"           lexically-bound-variable)
+                   (") "          default-color)
+                   ("x"           lexically-bound-variable)
+                   ("])"          default-color))
+                 (list '((15 16) (18 19))))
+     
+     (build-test "(if 1 2 3)"
+                '(("("  default-color)
+                  ("if" imported-syntax)
+                  (" "  default-color)
+                  ("1"  constant)
+                  (" "  default-color)
+                  ("2"  constant)
+                  (" "  default-color)
+                  ("3"  constant)
+                  (")"  default-color)))
+     (build-test "(if 1 2)"
+                '(("("  default-color)
+                  ("if" imported-syntax)
+                  (" "  default-color)
+                  ("1"  constant)
+                  (" "  default-color)
+                  ("2"  constant)
+                  (")"  default-color)))
+     
+     (build-test "(begin 1 2)"
+                '(("("     default-color)
+                  ("begin" imported-syntax)
+                  (" "     default-color)
+                  ("1"     constant)
+                  (" "     default-color)
+                  ("2"     constant)
+                  (")"     default-color)))
+     (build-test "(begin0 1 2)"
+                '(("("      default-color)
+                  ("begin0" imported-syntax)
+                  (" "      default-color)
+                  ("1"      constant)
+                  (" "      default-color)
+                  ("2"      constant)
+                  (")"      default-color)))
+     (build-test "(let ([x x]) x)"
+                '(("("   default-color)
+                  ("let" imported-syntax)
+                  (" ([" default-color)
+                  ("x"   lexically-bound-variable)
+                  (" "   default-color)
+                  ("x"   free-variable)
+                  ("]) " default-color)
+                  ("x"   lexically-bound-variable)
+                  (")"   default-color))
+                (list '((7 8) (13 14))))
+     (build-test "(letrec ([x x]) x)"
+                '(("("      default-color)
+                  ("letrec" imported-syntax)
+                  (" (["    default-color)
+                  ("x"      lexically-bound-variable)
+                  (" "      default-color)
+                  ("x"      lexically-bound-variable)
+                  ("]) "    default-color)
+                  ("x"      lexically-bound-variable)
+                  (")"      default-color))
+                (list '((10 11) (12 13) (16 17))))
+     (build-test "(#%top . x)"
+                 '(("("     default-color) 
+                   ("#%top" imported-syntax)
+                   (" . "   default-color)
+                   ("x"     free-variable)
+                   (")"    default-color)))
+     (build-test "(set! x 1)"
+                '(("("    default-color)
+                  ("set!" imported-syntax)
+                  (" "    default-color)
+                  ("x"    free-variable)
+                  (" "    default-color)
+                  ("1"    constant)
+                  (")"    default-color)))
+     (build-test "(set! x 1) (define x 2)"
+                 '(("("      default-color)
+                   ("set!"   imported-syntax)
+                   (" "      default-color)
+                   ("x"      lexically-bound)
+                   (" "      default-color)
+                   ("1"      constant)
+                   (") ("    default-color)
+                   ("define" imported-syntax)
+                   (" "      default-color)
+                   ("x"      set!d)   ;; top-level doesn't help here ....
+                   (" 2)"    default-color))
+                 (list '((19 20) (6 7))))
+     (build-test "(let ([x 1]) (set! x 2))"
+                '(("("    default-color)
+                  ("let"   imported-syntax)
+                  (" (["   default-color)
+                  ("x"     set!d)
+                  (" "     default-color)
+                  ("1"     constant)
+                  ("]) ("  default-color)
+                  ("set!"  imported-syntax)
+                  (" "     default-color)
+                  ("x"     set!d)
+                  (" "     default-color)
+                  ("2"     constant)
+                  ("))"    default-color))
+                (list '((7 8) (19 20)))
+                #:tooltips '((7 8 "1 bound occurrence")
+                             (7 8 "mutated variable")
+                             (19 20 "mutated variable")))
+     
+     (build-test "object%"
+                '(("object%" imported-syntax))) ; used to be lexically-bound-variable
+     (build-test "unbound-id"
+                '(("unbound-id" free-variable)))
+     (build-test "(define bd 1) bd"
+                '(("("       default-color)
+                  ("define"  imported-syntax)
+                  (" "       default-color)
+                  ("bd"      lexically-bound-variable)
+                  (" "       default-color)
+                  ("1"       constant)
+                  (") "      default-color)
+                  ("bd"      lexically-bound-variable))
+                (list '((8 10) (14 16))))
+     (build-test "#'abc"
+                '(("#'"  imported-syntax)
+                  ("abc" constant)))
+     (build-test "(with-continuation-mark 1 2 3)"
+                '(("("                      default-color)
+                  ("with-continuation-mark" imported-syntax)
+                  (" "                      default-color)
+                  ("1"                      constant)
+                  (" "                      default-color)
+                  ("2"                      constant)
+                  (" "                      default-color)
+                  ("3"                      constant)
+                  (")"                      default-color)))
+     (build-test "(f x)"
+                '(("(" default-color)
+                  ("f" free-variable)
+                  (" " default-color)
+                  ("x" free-variable)
+                  (")" default-color)))
+     (build-test "(define-syntax (f stx) (syntax 1))"
+                '(("("             default-color)
+                  ("define-syntax" imported-syntax)
+                  (" ("            default-color)
+                  ("f"             lexically-bound)
+                  (" "             default-color)
+                  ("stx"           lexically-bound)
+                  (") ("           default-color)
+                  ("syntax"        imported-syntax)
+                  (" "             default-color)
+                  ("1"             constant)
+                  ("))"            default-color)))
+     
+     (build-test "(define-for-syntax (f x) x)"
+                '(("("                 default-color)
+                  ("define-for-syntax" imported-syntax)
+                  (" ("                default-color)
+                  ("f"                 lexically-bound)
+                  (" "                 default-color)
+                  ("x"                 lexically-bound-variable)
+                  (") "                default-color)
+                  ("x"                 lexically-bound-variable)
+                  (")"                 default-color))
+                (list '((22 23) (25 26))))
+     (build-test "(define-syntax-rule (m x y z) (list (λ x y) (λ x z)))\n(m x x x)"
+                 '(("(" default-color)
+                   ("define-syntax-rule" imported)
+                   (" (" default-color)
+                   ("m" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (" " default-color)
+                   ("y" lexically-bound)
+                   (" " default-color)
+                   ("z" lexically-bound)
+                   (") (list (λ " default-color)
+                   ("x" lexically-bound)
+                   (" " default-color)
+                   ("y" lexically-bound)
+                   (") (λ " default-color)
+                   ("x" lexically-bound)
+                   (" " default-color)
+                   ("z" lexically-bound)
+                   (")))\n(" default-color)
+                   ("m" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound) 
+                   (")" default-color))
+                 (list '((21 22) (55 56)) 
+                       '((23 24) (39 40) (47 48))
+                       '((25 26) (41 42))
+                       '((27 28) (49 50))
+                       '((57 58) (59 60) (61 62)))
+                 #:tooltips '((21 22 "1 bound occurrence")
+                              (23 24 "2 bound occurrences")
+                              (25 26 "1 bound occurrence")
+                              (27 28 "1 bound occurrence")
+                              (57 58 "2 bound occurrences")))
+     
+     (build-test "(define-syntax-rule (m x y z) (list (λ y x) (λ z x)))\n(m w w w)"
+                 '(("(" default-color)
+                   ("define-syntax-rule" imported)
+                   (" (" default-color)
+                   ("m" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (" " default-color)
+                   ("y" lexically-bound)
+                   (" " default-color)
+                   ("z" lexically-bound)
+                   (") (list (λ " default-color)
+                   ("y" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (") (λ " default-color)
+                   ("z" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (")))\n(" default-color)
+                   ("m" lexically-bound)
+                   (" " default-color)
+                   ("w" lexically-bound)
+                   (" " default-color)
+                   ("w" lexically-bound)
+                   (" " default-color)
+                   ("w" lexically-bound) 
+                   (")" default-color))
+                 (list '((21 22) (55 56)) 
+                       '((23 24) (41 42) (49 50))
+                       '((25 26) (39 40))
+                       '((27 28) (47 48))
+                       '((61 62) (57 58))
+                       '((59 60) (57 58)))
+                 #:tooltips '((21 22 "1 bound occurrence")
+                              (23 24 "2 bound occurrences")
+                              (25 26 "1 bound occurrence")
+                              (27 28 "1 bound occurrence")
+                              (57 58 "2 binding occurrences")
+                              (59 60 "1 bound occurrence") 
+                              (61 62 "1 bound occurrence")))
+
+     (build-test "(module m mzscheme)"
+                '(("("            default-color)
+                  ("module"       imported-syntax)
+                  (" m mzscheme)" default-color)))
+     (build-test "(require-for-syntax mzscheme)"
+                '(("("                  default-color)
+                  ("require-for-syntax" imported-syntax)
+                  (" "          default-color)
+                  ("mzscheme"   unused-require)
+                  (")"          default-color)))
+     (build-test "(require mzlib/list)"
+                '(("("                   default-color)
+                  ("require"             imported-syntax)
+                  (" "                   default-color)
+                  ("mzlib/list"          unused-require)
+                  (")"                   default-color)))
+     (build-test "(module m mzscheme (provide x) (define x 1))"
+                '(("("             default-color)
+                  ("module"        imported-syntax)
+                  (" m mzscheme (" default-color)
+                  ("provide"       imported-syntax)
+                  (" "             default-color)
+                  ("x"             lexically-bound-variable)
+                  (") ("           default-color)
+                  ("define"        imported-syntax)
+                  (" "             default-color)
+                  ("x"             lexically-bound-variable)
+                  (" "             default-color)
+                  ("1"             constant)
+                  ("))"            default-color))
+                (list '((10 18) (20 27) (32 38) (41 41))
+                      '((39 40) (28 29))))
+     
+     (build-test "(module m mzscheme (+ 1 2))"
+                '(("("             default-color)
+                  ("module"        imported-syntax)
+                  (" m mzscheme (" default-color)
+                  ("+"             imported-variable)
+		  (" "             default-color)
+		  ("1"             constant)
+		  (" "             default-color)
+		  ("2"             constant)
+                  ("))"            default-color))
+                (list '((10 18) (19 19) (20 21) (22 22) (24 24))))
+     
+     (build-test "(module m mzscheme (require mzlib/list))"
+                '(("("                 default-color)
+                  ("module"            imported-syntax)
+                  (" m mzscheme ("     default-color)
+                  ("require"           imported-syntax)
+                  (" "                 default-color)
+                  ("mzlib/list"        unused-require)
+                  ("))"                default-color))
+                (list '((10 18) (20 27))))
+     
+     (build-test "(module m mzscheme (require-for-syntax mzlib/list) (define-syntax s foldl))"
+                '(("("                     default-color)
+                  ("module"                imported-syntax)
+                  (" m mzscheme ("         default-color)
+                  ("require-for-syntax"    imported-syntax)
+                  (" mzlib/list) ("        default-color)
+                  ("define-syntax"         imported-syntax)
+                  (" "                     default-color)
+                  ("s"                     lexically-bound)
+                  (" "                     default-color)
+                  ("foldl"                 imported-variable)
+                  ("))"                    default-color))
+                (list '((10 18) (20 38) (52 65))
+                      '((39 49) (68 73))))
+     
+     (build-test "(module m mzscheme (require-for-syntax mzlib/etc) (define-syntax s (rec f 1)))"
+                '(("("                     default-color)
+                  ("module"                imported-syntax)
+                  (" m mzscheme ("         default-color)
+                  ("require-for-syntax"    imported-syntax)
+                  (" mzlib/etc) ("         default-color)
+                  ("define-syntax"         imported-syntax)
+                  (" "                     default-color)
+                  ("s"                     lexically-bound)
+                  (" ("                    default-color)
+                  ("rec"                   imported-syntax)
+                  (" "                     default-color)
+                  ("f"                     lexically-bound)
+                  (" "                     default-color)
+                  ("1"                     constant)
+                  (")))"                   default-color))
+                (list '((10 18) (20 38) (51 64))
+                      '((39 48) (68 71))))
+
+     (build-test "(define-for-syntax (f x) x) (define (f x) x) f (define-syntax (m x) (f x))"
+                 '(("(" default-color)
+                   ("define-for-syntax" imported)
+                   (" (" default-color)
+                   ("f" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (") " default-color)
+                   ("x" lexically-bound)
+                   (") (" default-color)
+                   ("define" imported)
+                   (" (" default-color)
+                   ("f" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (") " default-color)
+                   ("x" lexically-bound)
+                   (") " default-color)
+                   ("f" lexically-bound)
+                   (" (" default-color)
+                   ("define-syntax" imported)
+                   (" (" default-color)
+                   ("m" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (") (" default-color)
+                   ("f" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   ("))" default-color))
+                 '(((20 21) (69 70))
+                   ((22 23) (25 26))
+                   ((37 38) (45 46))
+                   ((39 40) (42 43))
+                   ((65 66) (71 72))))
+     
+     (build-test (string-append
+                  "(module m mzscheme (define-for-syntax (f x) x)"
+                  " (define (f x) x) f (define-syntax (m stx) (f stx)))")
+                 '(("(" default-color)
+                   ("module" imported)
+                   (" m mzscheme (" default-color)
+                   ("define-for-syntax" imported)
+                   (" (" default-color)
+                   ("f" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (") " default-color)
+                   ("x" lexically-bound)
+                   (") (" default-color)
+                   ("define" imported)
+                   (" (" default-color)
+                   ("f" lexically-bound)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (") " default-color)
+                   ("x" lexically-bound)
+                   (") " default-color)
+                   ("f" lexically-bound)
+                   (" (" default-color)
+                   ("define-syntax" imported)
+                   (" (" default-color)
+                   ("m" lexically-bound)
+                   (" " default-color)
+                   ("stx" lexically-bound)
+                   (") (" default-color)
+                   ("f" lexically-bound)
+                   (" " default-color)
+                   ("stx" lexically-bound)
+                   (")))" default-color))
+                 '(((10 18) (20 37) (48 54) (67 80))
+                   ((39 40) (90 91))
+                   ((41 42) (44 45))
+                   ((56 57) (64 65))
+                   ((58 59) (61 62))
+                   ((84 87) (92 95))))
+
+     (build-test
+      (string-append
+       "(module x racket\n"
+       "  (module m racket\n"
+       "    (define-syntax (lam stx) #'1)\n"
+       "    (provide lam))\n"
+       "  (require 'm)\n"
+       "  lam)\n")
+      '(("("                default-color)
+        ("module"           imported)
+        (" x racket\n  ("   default-color)
+        ("module"           imported)
+        (" m racket\n    (" default-color)
+        ("define-syntax"    imported)
+        (" ("               default-color)
+        ("lam"              lexically-bound)
+        (" "                default-color)
+        ("stx"              lexically-bound)
+        (") "               default-color)
+        ("#'"               imported)
+        ("1)\n    ("        default-color)
+        ("provide"          imported)
+        (" "                default-color)
+        ("lam"              lexically-bound)
+        ("))\n  ("          default-color)
+        ("require"          imported)
+        (" 'm)\n  "         default-color)
+        ("lam"              imported)
+        (")\n"              default-color))
+      '(((10 16) (20 26) (92 99))
+        ((29 35) (41 54) (65 67) (75 82))
+        ((56 59) (83 86))
+        ((100 102) (106 109))))
+
+
+
+     
+     (build-test "(define-syntax s (lambda (stx) (syntax-case stx () (_ 123))))"
+                '(("("             default-color)
+                  ("define-syntax" imported-syntax)
+                  (" "             default-color)
+                  ("s"             lexically-bound)
+                  (" ("            default-color)
+                  ("lambda"        imported-syntax)
+                  (" ("            default-color)
+                  ("stx"           lexically-bound-variable)
+                  (") ("           default-color)
+                  ("syntax-case"   imported-syntax)
+                  (" "             default-color)
+                  ("stx"           lexically-bound-variable)
+                  (" () ("         default-color)
+                  ("_"             lexically-bound)
+                  (" "             default-color)
+                  ("123"           constant)
+                  ("))))"          default-color))
+                (list '((26 29) (44 47))))
+
+     (build-test "(require mzlib/list) first"
+                '(("("                    default-color)
+                  ("require"              imported-syntax)
+                  (" mzlib/list) "        default-color)
+                  ("first"                imported-variable))
+                (list '((9 19) (21 26))))
+
+     (build-test "(require mzlib/etc) (rec f 1)"
+                '(("("                    default-color)
+                  ("require"              imported-syntax)
+                  (" mzlib/etc) ("        default-color)
+                  ("rec"                  imported-syntax)
+                  (" "                    default-color)
+                  ("f"                    lexically-bound)
+                  (" "                    default-color)
+                  ("1"                    constant)
+                  (")"                    default-color))
+                (list '((9 18) (21 24))))
+
+     (build-test "(define-struct s ())"
+                '(("("             default-color)
+                  ("define-struct" imported-syntax)
+                  (" "             default-color)
+                  ("s"             lexically-bound)
+                  (" ())"          default-color)))
+     
+     (build-test "(define-struct s ()) (define-struct (t s) ())"
+                '(("("             default-color)
+                  ("define-struct" imported-syntax)
+                  (" "             default-color)
+                  ("s"             lexically-bound-syntax)
+                  (" ()) ("        default-color)
+                  ("define-struct" imported-syntax)
+                  (" ("            default-color)
+                  ("t"             lexically-bound)
+                  (" "             default-color)
+                  ("s"             lexically-bound-syntax)
+                  (") ())"         default-color))
+                (list '((15 16) (39 40))))
+     
+     (build-test "(let () (define-struct s (x)) 1)"
+                 '(("("             default-color)
+                   ("let"           imported-syntax)
+                   (" () ("         default-color)
+                   ("define-struct" imported-syntax)
+                   (" "             default-color)
+                   ("s"             lexically-bound)
+                   (" (x)) "        default-color)
+                   ("1"             constant)
+                   (")"             default-color)))
+     
+     (build-test "(let ([x 12]) (define-struct s (x)) x)"
+                 '(("("             default-color)
+                   ("let"           imported-syntax)
+                   (" (["           default-color)
+                   ("x"             lexically-bound-variable)
+                   (" "             default-color)
+                   ("12"            constant)
+                   ("]) ("          default-color)
+                   ("define-struct" imported-syntax)
+                   (" "             default-color)
+                   ("s"             lexically-bound)
+                   (" (x)) "        default-color)
+                   ("x"             lexically-bound-variable)
+                   (")"             default-color))
+                 (list '((7 8) (36 37))))
+     
+     (build-test "`(1 ,x 2)"
+                '(("`"        imported-syntax)
+                  ("("        default-color)
+                  ("1"        constant)
+                  (" ,"       default-color)
+                  ("x"        free-variable)
+                  (" "        default-color)
+                  ("2"        constant)
+                  (")"        default-color)))
+
+     (build-test "`(a ,2 b c d)"
+                `(("`"  imported-syntax)
+                  ("("  default-color)
+                  ("a"  constant)
+                  (" ," default-color)
+                  ("2"  constant)
+                  (" "  default-color)
+                  ("b"  constant)
+                  (" "  default-color)
+                  ("c"  constant)
+                  (" "  default-color)
+                  ("d"  constant)
+                  (")"  default-color)))
+     
+     (build-test "#! /usr/bin/env"
+                '(("#! /usr/bin/env" default-color)))
+     
+     (build-test "#! /usr/bin/env\n"
+                '(("#! /usr/bin/env\n" default-color)))
+     
+     (build-test "#! /usr/bin/env\n1"
+                '(("#! /usr/bin/env\n" default-color)
+                  ("1"    constant)))
+     
+     (build-test "#! /usr/bin/env\n1\n1"
+                '(("#! /usr/bin/env\n" default-color)
+                  ("1"    constant)
+                  ("\n"   default-color)
+                  ("1"    constant)))
+     
+     (build-test "#! /usr/bin/env\n(lambda (x) x)"
+                 '(("#! /usr/bin/env\n("    default-color)
+                   ("lambda"  imported-syntax)
+                   (" ("      default-color)
+                   ("x"       lexically-bound-variable)
+                   (") "      default-color)
+                   ("x"       lexically-bound-variable)
+                   (")"       default-color))
+                 (list '((25 26) (28 29))))
+     
+     (build-test "(module m mzscheme (lambda (x) x) (provide))"
+                '(("("             default-color)
+                  ("module"        imported-syntax)
+                  (" m mzscheme (" default-color)
+                  ("lambda"        imported-syntax)
+                  (" ("            default-color)
+                  ("x"             lexically-bound-variable)
+                  (") "            default-color)
+                  ("x"             lexically-bound-variable)
+                  (") ("           default-color)
+                  ("provide"       imported-syntax)
+                  ("))"            default-color))
+                (list '((10 18) (20 26) (35 42))
+                      '((28 29) (31 32))))
+     
+     (build-test "(module m mzscheme (define-struct s (a)) s-a make-s s? set-s-a!)"
+                '(("("             default-color)
+                  ("module"        imported-syntax)
+                  (" m mzscheme (" default-color)
+                  ("define-struct" imported-syntax)
+                  (" "             default-color)
+                  ("s"             lexically-bound-syntax)
+                  (" (a)) "        default-color)
+                  ("s-a"           lexically-bound-variable)
+                  (" "             default-color)
+                  ("make-s"        lexically-bound-variable)
+                  (" "             default-color)
+                  ("s?"            lexically-bound-variable)
+                  (" "             default-color)
+                  ("set-s-a!"      lexically-bound-variable)
+                  (")"             default-color))
+                (list '((10 18) (20 33))
+                      '((37 38) (43 44) (61 62))
+                      '((34 35) (41 42) (50 51) (52 53) (59 60))))
+     
+     (build-test "(module m racket/base (struct s (a [b #:mutable])) s-a s-b s s? set-s-b!)"
+                '(("("                    default-color)
+                  ("module"               imported-syntax)
+                  (" m racket/base ("     default-color)
+                  ("struct"               imported-syntax)
+                  (" "                    default-color)
+                  ("s"                    lexically-bound-syntax)
+                  (" (a [b #:mutable])) " default-color)
+                  ("s-a"                  lexically-bound-variable)
+                  (" "                    default-color)
+                  ("s-b"                  lexically-bound-variable)
+                  (" "                    default-color)
+                  ("s"                    lexically-bound-variable)
+                  (" "                    default-color)
+                  ("s?"                   lexically-bound-variable)
+                  (" "                    default-color)
+                  ("set-s-b!"             lexically-bound-variable)
+                  (")"                    default-color))
+                (list '((10 21) (23 29))
+                      '((30 31) (51 52) (55 56) (59 60) (61 62) (68 69))
+                      '((33 34) (53 54))
+                      '((36 37) (57 58) (70 71))))
+     
+     (build-test "(let l () l l)"
+                '(("("    default-color)
+                  ("let"  imported-syntax)
+                  (" "    default-color)
+                  ("l"    lexically-bound-variable)
+                  (" () " default-color)
+                  ("l"    lexically-bound-variable)
+                  (" "    default-color)
+                  ("l"    lexically-bound-variable)
+                  (")"    default-color))
+                (list '((5 6) (10 11) (12 13))))
+     
+     (build-test "(class object% this)"
+                '(("("       default-color)
+                  ("class"   imported-syntax)
+                  (" "       default-color)
+                  ("object%" imported-syntax) ; was lexically-bound-variable
+                  (" "       default-color)
+                  ("this"    imported)
+                  (")"       default-color)))
+     
+     (build-test "(module m mzscheme (require mzlib/list) foldl)"
+                '(("("                    default-color)
+                  ("module"               imported-syntax)
+                  (" m mzscheme ("        default-color)
+                  ("require"              imported-syntax)
+                  (" mzlib/list) "        default-color)
+                  ("foldl"                imported-variable)
+                  (")"                    default-color))
+                (list '((10 18) (20 27))
+                      '((28 38) (40 45))))
+     (build-test "(module m lang/htdp-beginner empty)"
+                '(("("                        default-color)
+                  ("module"                   imported-syntax)
+                  (" m lang/htdp-beginner "   default-color)
+                  ("empty"                    imported-variable)
+                  (")"                        default-color))
+                (list '((10 28) (29 34))))
+     (build-test "(module m mzscheme (require (prefix x: mzlib/list)) x:foldl)"
+                '(("("                                default-color)
+                  ("module"                           imported-syntax)
+                  (" m mzscheme ("                    default-color)
+                  ("require"                          imported-syntax)
+                  (" (prefix x: mzlib/list)) "        default-color)
+                  ("x:foldl"                          imported-variable)
+                  (")"                                default-color))
+                (list '((10 18) (20 27))
+                      '((36 38) (52 54))
+                      '((39 49) (54 59))))
+
+     (build-test "(module m mzscheme (require (prefix x: mzlib/list) mzlib/list) x:foldl foldl)"
+                '(("("                                    default-color)
+                  ("module"                               imported-syntax)
+                  (" m mzscheme ("                        default-color)
+                  ("require"                              imported-syntax)
+                  (" (prefix x: mzlib/list) mzlib/list) " default-color)
+                  ("x:foldl"                              imported-variable)
+                  (" "                                    default-color)
+                  ("foldl"                                imported-variable)
+                  (")"                                    default-color))
+                (list '((10 18) (20 27))
+                      '((36 38) (63 65))
+                      '((39 49) (65 70))
+                      '((51 61) (71 76))))
+
+     (build-test (string-append
+                  "(module m mzscheme (require (only mzlib/list foldr)"
+                  " (only mzlib/list foldl)) foldl foldr)")
+                 '(("("                                                  default-color)
+                   ("module"                                             imported-syntax)
+                   (" m mzscheme ("                                      default-color)
+                   ("require"                                            imported-syntax)
+                   (" (only mzlib/list foldr) (only mzlib/list foldl)) " default-color)
+                   ("foldl"                                              imported-variable)
+                   (" "                                                  default-color)
+                   ("foldr"                                              imported-variable)
+                   (")"                                                  default-color))
+                 (list '((10 18) (20 27))
+                       '((34 44) (83 88))
+                       '((58 68) (77 82))))
+
+     (build-test "(module m mzscheme (require (prefix x: mzscheme)) x:+ +)"
+                 '(("("                                                  default-color)
+                   ("module"                                             imported-syntax)
+                   (" m mzscheme ("                                      default-color)
+                   ("require"                                            imported-syntax)
+                   (" (prefix x: mzscheme)) "                            default-color)
+                   ("x:+"                                                imported-variable)
+                   (" "                                                  default-color)
+                   ("+"                                                  imported-variable)
+                   (")"                                                  default-color))
+                 (list '((10 18) (20 27) (54 55))
+                       '((36 38) (50 52))
+                       '((39 47) (52 53))))
+     
+     (build-test "(module m mzscheme (require mzlib/etc) (rec f 1))"
+                '(("("                     default-color)
+                  ("module"                imported-syntax)
+                  (" m mzscheme ("         default-color)
+                  ("require"               imported-syntax)
+                  (" mzlib/etc) ("         default-color)
+                  ("rec"                   imported-syntax)
+                  (" "                     default-color)
+                  ("f"                     lexically-bound)
+                  (" "                     default-color)
+                  ("1"                     constant)
+                  ("))"                    default-color))
+                (list '((10 18) (20 27) (46 46))
+                      '((28 37) (40 43))))
+
+     (build-test "(module m lang/htdp-intermediate (local ((define x x)) x))"
+                '(("("                           default-color)
+                  ("module"                      imported-syntax)
+                  (" m lang/htdp-intermediate (" default-color)
+                  ("local"                       imported-syntax)
+                  (" (("                         default-color)
+                  ("define"                      imported-syntax)
+                  (" "                           default-color)
+                  ("x"                           lexically-bound-variable)
+                  (" "                           default-color)
+                  ("x"                           lexically-bound-variable)
+                  (")) "                         default-color)
+                  ("x"                           lexically-bound-variable)
+                  ("))"                          default-color))
+                (list '((10 32) (34 39) (42 48))
+                      '((49 50) (51 52) (55 56))))
+
+     (build-test "(module m mzscheme (define-syntax rename #f) (require (rename mzscheme ++ +)))"
+                 '(("("                         default-color)
+                   ("module"                    imported)
+                   (" m mzscheme ("             default-color)
+                   ("define-syntax"             imported)
+                   (" "                         default-color)
+                   ("rename"                    lexically-bound)
+                   (" #f) ("                    default-color)
+                   ("require"                   imported)
+                   (" (rename mzscheme "        default-color)
+                   ("++"                        imported)
+                   (" +)))"                     default-color))
+                 
+                 (list '((10 18) (20 33) (46 53))))
+     
+     (build-test "(module m mzscheme (define-syntax rename #f) (define f 1) (provide (rename f g)))"
+                 '(("("               default-color)
+                   ("module"          imported)
+                   (" m mzscheme ("   default-color)
+                   ("define-syntax"   imported)
+                   (" "               default-color)
+                   ("rename"          lexically-bound)
+                   (" #f) ("          default-color)
+                   ("define"          imported)
+                   (" "               default-color)
+                   ("f"               lexically-bound)
+                   (" 1) ("           default-color)
+                   ("provide"         imported)
+                   (" (rename "       default-color)
+                   ("f"               lexically-bound)
+                   (" g)))"           default-color))
+                 (list '((10 18) (20 33) (46 52) (55 55) (59 66))
+                       '((53 54) (75 76))))
+     
+     (build-test "(module m mzscheme (define X 1) (provide (all-defined-except X)))"
+                 '(("("                     default-color)
+                   ("module"                imported)
+                   (" m mzscheme ("         default-color)
+                   ("define"                imported)
+                   (" "                     default-color)
+                   ("X"                     lexically-bound)
+                   (" 1) ("                 default-color)
+                   ("provide"               imported)
+                   (" (all-defined-except " default-color)
+                   ("X"                     lexically-bound)
+                   (")))"                   default-color))
+                 
+                 (list '((10 18) (20 26) (29 29) (33 40))
+                       '((27 28) (61 62))))     
+     
+     (build-test (string-append "(module m mzscheme (require-for-syntax mzscheme)"
+                                " (require-for-template mzscheme) (quote-syntax +))")
+                 '(("("                    default-color)
+                   ("module"               imported)
+                   (" m mzscheme ("        default-color)
+                   ("require-for-syntax"   imported)
+                   (" mzscheme) ("         default-color)
+                   ("require-for-template" imported)
+                   (" mzscheme) ("         default-color)
+                   ("quote-syntax"         imported)
+                   (" +))"                 default-color))
+                 (list
+                  '((71 79) (95 96))
+                  '((10 18) (20 38) (50 70) (82 94) (95 96))
+                  '((39 47) (95 96))))
+     
+     (build-test (format "~s" '(module m racket (module n racket list) (module+ o list)))
+                 '(("(" default-color)
+                   ("module" imported)
+                   (" m racket (" default-color)
+                   ("module" imported)
+                   (" n racket " default-color)
+                   ("list" imported)
+                   (") (" default-color)
+                   ("module+" imported)
+                   (" o " default-color)
+                   ("list" imported)
+                   ("))" default-color))
+                 (list 
+                  '((10 16) (18 24) (41 48) (51 55))
+                  '((27 33) (34 38))))
+     
+     ;; test case from Chongkai
+     (build-test (format "~s\n\n#reader'reader\n1\n"
+                         '(module reader mzscheme
+                            (provide (rename mrs read-syntax) read)
+                            (define (mrs sv p)
+                              (datum->syntax-object
+                               (read-syntax #f (open-input-string "a"))
+                               `(module f mzscheme
+                                  (provide x)
+                                  (define x 1))
+                               (list sv #f #f #f #f)))))
+                 '(("(" default-color)
+                   ("module" imported)
+                   (" reader mzscheme (" default-color)
+                   ("provide" imported)
+                   (" (rename " default-color)
+                   ("mrs" lexically-bound)
+                   (" read-syntax) " default-color)
+                   ("read" imported)
+                   (") (" default-color)
+                   ("define" imported)
+                   (" (" default-color)
+                   ("mrs" lexically-bound)
+                   (" " default-color)
+                   ("sv" lexically-bound)
+                   (" " default-color)
+                   ("p" lexically-bound)
+                   (") (" default-color)
+                   ("datum->syntax-object" imported)
+                   (" (" default-color)
+                   ("read-syntax" imported)
+                   (" #f (" default-color)
+                   ("open-input-string" imported)
+                   (" \"a\")) (" default-color)
+                   ("quasiquote" imported)
+                   (" (module f mzscheme (provide x) (define x 1))) (" default-color)
+                   ("list" imported)
+                   (" " default-color)
+                   ("sv" lexically-bound)
+                   (" #f #f #f #f))))\n\n#reader'reader\n1\n" default-color))
+                 
+                 (list '((15 23) (25 32) (58 62) (65 71) (83 83) (84 104) (105 105) (106 117)
+                                 (118 118) (121 121) (122 139) (140 140) (147 157) (204 204)
+                                 (205 209) (213 213) (216 216) (219 219) (222 222))
+                       '((77 79) (210 212))
+                       '((73 76) (41 44))))
+     
+     (build-dir-test "(module m mzscheme (require \"~a\") first first)"
+                     '(("("             default-color)
+                       ("module"        imported-syntax)
+                       (" m mzscheme (" default-color)
+                       ("require"       imported-syntax)
+                       (" \""           default-color)
+                       (relative-path   default-color)
+                       ("\") "          default-color)
+                       ("first"         imported-variable)
+                       (" "             default-color)
+                       ("first"         imported-variable)
+                       (")"             default-color))
+                     #f)
+     
+     (build-test "#lang scheme/base\n(require scheme)\n(define-syntax m (lambda (x) #'1))"
+                 '(("#lang scheme/base\n(" default-color)
+                   ("require"              imported)
+                   (" scheme)\n("          default-color)
+                   ("define-syntax"        imported)
+                   (" "                    default-color)
+                   ("m"                    lexically-bound)
+                   (" ("                   default-color)
+                   ("lambda"               imported)
+                   (" ("                   default-color)
+                   ("x"                    lexically-bound)
+                   (") "                   default-color)
+                   ("#'"                   imported)
+                   ("1))"                  default-color))
+                 (list '((27 33) (19 26) (36 49) (53 59) (64 66))))
+     
+     (build-test (string-append
+                  "#lang racket (begin-for-syntax (require (for-syntax racket))"
+                  " (define x 1) (begin-for-syntax (define x 2) x))")
+                 '(("#lang racket (" default-color)
+                   ("begin-for-syntax" imported)
+                   (" (" default-color)
+                   ("require" imported)
+                   (" (" default-color)
+                   ("for-syntax" imported)
+                   (" " default-color)
+                   ("racket" default-color)
+                   (")) (" default-color)
+                   ("define" imported)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (" 1) (" default-color)
+                   ("begin-for-syntax" imported)
+                   (" (" default-color)
+                   ("define" imported)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (" 2) " default-color)
+                   ("x" lexically-bound)
+                   ("))" default-color))
+                 (list '((6 12) (14 30) (32 39) (41 51) (62 68) (71 71) (75 91))
+                       '((52 58) (93 99) (102 102))
+                       '((100 101) (105 106))))
+     
+     (build-test
+      "#lang racket (provide (contract-out [f (->i ((p? any/c)) (_ (p?) p?))])) (define (f a) 1)"
+      '(("#lang racket (" default-color)
+        ("provide" imported)
+        (" (" default-color)
+        ("contract-out" imported)
+        (" [" default-color)
+        ("f" lexically-bound)
+        (" (" default-color)
+        ("->i" imported)
+        (" ((" default-color)
+        ("p?" lexically-bound)
+        (" " default-color)
+        ("any/c" imported)
+        (")) (_ (" default-color)
+        ("p?" lexically-bound)
+        (") " default-color)
+        ("p?" lexically-bound)
+        ("))])) (" default-color)
+        ("define" imported)
+        (" (" default-color)
+        ("f" lexically-bound)
+        (" " default-color)
+        ("a" lexically-bound)
+        (") 1)" default-color))
+      (list '((82 83) (37 38))
+            '((46 48) (61 63) (65 67))
+            '((6 12) (14 21) (23 35) (40 43) (49 54) (74 80) (87 87))))
+
+     (build-test "#lang racket/base\n(define red 1)\n(module+ test red)"
+                 '(("#lang racket/base\n(" default-color)
+                   ("define"               imported)
+                   (" "                    default-color)
+                   ("red"                  lexically-bound)
+                   (" 1)\n("               default-color)
+                   ("module+"              imported)
+                   (" test "               default-color)
+                   ("red"                  imported)
+                   (")"                    default-color))
+                 '(((26 29) (47 50))
+                   ((6 17) (19 25) (30 30) (34 41))))
+     (build-test "#lang racket/base\n(define 🏴‍☠️🏴‍☠️🏴‍☠️ 1)\n(module+ test 🏴‍☠️🏴‍☠️🏴‍☠️)"
+                 '(("#lang racket/base\n(" default-color)
+                   ("define"               imported)
+                   (" "                    default-color)
+                   ("🏴‍☠️🏴‍☠️🏴‍☠️"                  lexically-bound)
+                   (" 1)\n("               default-color)
+                   ("module+"              imported)
+                   (" test "               default-color)
+                   ("🏴‍☠️🏴‍☠️🏴‍☠️"                  imported)
+                   (")"                    default-color))
+                 '(((26 38) (56 68))
+                   ((6 17) (19 25) (39 39) (43 50))))
+     
+     (build-test "#lang racket/base\n(require '#%kernel)\npair?"
+                 '(("#lang racket/base\n(" default-color)
+                   ("require"              imported)
+                   (" '#%kernel)\n"        default-color)
+                   ("pair?"                imported))
+                 (list '((6 17) (19 26))
+                       '((27 36) (38 43))))
+
+     (build-test "#lang racket\n(begin-for-syntax (module m racket/base (let ([x 1]) x)))"
+                 '(("#lang racket\n(" default-color)
+                   ("begin-for-syntax" imported)
+                   (" (" default-color)
+                   ("module" imported)
+                   (" m racket/base (" default-color)
+                   ("let" imported)
+                   (" ([" default-color)
+                   ("x" lexically-bound)
+                   (" 1]) " default-color)
+                   ("x" lexically-bound)
+                   (")))" default-color))
+                 (list '((60 61) (66 67))
+                       '((6 12) (14 30) (32 38))))
+     
+     (build-test "#lang racket\n(define-for-syntax x 1)\n(begin-for-syntax (module* m #f x))"
+                 '(("#lang racket\n(" default-color)
+                   ("define-for-syntax" imported)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (" 1)\n(" default-color)
+                   ("begin-for-syntax" imported)
+                   (" (" default-color)
+                   ("module*" imported)
+                   (" m #f " default-color)
+                   ("x" imported)
+                   ("))" default-color))
+                 (list '((6 12) (14 31) (34 34) (38 54) (56 63))
+                       '((32 33) (69 70))))
+
+     (build-test
+      "#lang racket (begin-for-syntax (module b racket/base (struct A ())))"
+      '(("#lang racket (" default-color)
+        ("begin-for-syntax" imported)
+        (" (" default-color)
+        ("module" imported)
+        (" b racket/base (" default-color)
+        ("struct" imported)
+        (" " default-color)
+        ("A" lexically-bound)
+        (" ())))" default-color))
+      (list '((6 12) (14 30) (32 38))))
+
+     (build-test
+      (string-append
+       "#lang racket\n"
+       "(define-syntax-rule (define/provide x e)\n"
+       "  (begin (define x e)\n"
+       "         (provide x)))\n"
+       "(define/provide x 1)\n")
+      `(("#lang racket\n("        default-color)
+        ("define-syntax-rule"     imported)
+        (" ("                     default-color)
+        ("define/provide"         lexically-bound)
+        (" "                      default-color)
+        ("x"                      lexically-bound)
+        (" "                      default-color)
+        ("e"                      lexically-bound)
+        (")\n  (begin (define "   default-color)
+        ("x"                      lexically-bound)
+        (" "                      default-color)
+        ("e"                      lexically-bound)
+        (")\n         (provide "  default-color)
+        ("x"                      lexically-bound)
+        (")))\n("                 default-color)
+        ("define/provide"         lexically-bound)
+        (" "                      default-color)
+        ("x"                      lexically-bound)
+        (" 1)\n"                  default-color))
+      (list '((6 12) (14 32) (57 62) (64 70) (86 93) (117 117))
+            '((34 48) (100 114))
+            '((49 50) (71 72) (94 95))
+            '((51 52) (73 74))))
+
+     (build-test
+      (string-append "#lang racket/base\n"
+                     "(#%require (just-meta 0 (for-syntax (only racket/list first))))\n"
+                     "(begin-for-syntax first)")
+      '(("#lang racket/base\n(#%require (just-meta 0 (for-syntax (only racket/list first))))\n("
+         default-color)
+        ("begin-for-syntax" imported)
+        (" " default-color)
+        ("first" imported)
+        (")" default-color))
+      (list '((6 17) (83 99))
+            '((60 71) (100 105))))
+
+     (build-test (string-append "#lang racket/base\n"
+                                "(require (for-syntax racket/base))\n"
+                                "(begin-for-syntax (local-require racket/list) first)")
+                 '(("#lang racket/base\n(" default-color)
+                   ("require" imported)
+                   (" (" default-color)
+                   ("for-syntax" imported)
+                   (" racket/base))\n(" default-color)
+                   ("begin-for-syntax" imported)
+                   (" (" default-color)
+                   ("local-require" imported)
+                   (" racket/list) " default-color)
+                   ("first" imported)
+                   (")" default-color))
+                 (list '((6 17) (19 26) (28 38) (54 70))
+                       '((39 50) (72 85))
+                       '((86 97) (99 104))))
+
+     (build-test (string-append "#lang racket\n"
+                                "(provide (for-syntax x))\n"
+                                "(begin-for-syntax (define x #f))")
+                 '(("#lang racket\n(" default-color)
+                   ("provide" imported)
+                   (" (" default-color)
+                   ("for-syntax" imported)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   ("))\n(" default-color)
+                   ("begin-for-syntax" imported)
+                   (" (" default-color)
+                   ("define" imported)
+                   (" " default-color)
+                   ("x" lexically-bound)
+                   (" #f))" default-color))
+                 (list '((6 12) (14 21) (23 33) (39 55) (57 63) (66 66))
+                       '((64 65) (34 35))))
+
+     (build-test (string-append
+                  "#lang racket\n"
+                  "(require (for-label racket/base))\n"
+                  "(provide (for-label (all-from-out racket/base)))")
+                 '(("#lang racket\n("   default-color)
+                   ("require"           imported)
+                   (" ("                default-color)
+                   ("for-label"         imported)
+                   (" racket/base))\n(" default-color)
+                   ("provide"           imported)
+                   (" ("                default-color)
+                   ("for-label"         imported)
+                   (" (all-from-out racket/base)))" default-color))
+                 (list '((6 12) (14 21) (23 32) (48 55) (57 66))))
+     
+     (build-test 
+      (string-append
+       "#lang racket/base\n"
+       "(require \"m.rkt\")\n"
+       "(m a-x\n"
+       "   a a a\n"
+       "   a-x a-x)\n")
+      '(("#lang racket/base\n(" default-color)
+        ("require" imported)
+        (" \"m.rkt\")\n(" default-color)
+        ("m" imported)
+        (" " default-color)
+        ("a-x" lexically-bound)
+        ("\n   " default-color)
+        ("a" lexically-bound)
+        (" " default-color)
+        ("a" lexically-bound)
+        (" " default-color)
+        ("a" lexically-bound)
+        ("\n   " default-color)
+        ("a-x" lexically-bound)
+        (" " default-color)
+        ("a-x" lexically-bound)
+        (")\n" default-color))
+      (list '((6 17) (19 26))
+            '((27 34) (37 38))
+            '((39 42) (55 58) (59 62))
+            '((39 40) (46 47) (48 49) (50 51)))
+      #:extra-files
+      (hash "m.rkt"
+            (with-output-to-string
+              (λ ()
+                (printf "#lang racket/base\n")
+                (pretty-write '(require (for-syntax racket/base)))
+                (pretty-write '(provide m))
+                (pretty-write
+                 '(define-syntax (m stx)
+                    (syntax-case stx ()
+                      [(_ a . rst)
+                       (let ()
+                         (define str (regexp-replace #rx"-.*$" (symbol->string (syntax-e #'a)) ""))
+                         (with-syntax ([a2 (datum->syntax #'a 
+                                                          (string->symbol str)
+                                                          (vector (syntax-source #'a)
+                                                                  (syntax-line #'a)
+                                                                  (syntax-column #'a)
+                                                                  (syntax-position #'a)
+                                                                  (string-length str))
+                                                          #'a)])
+                           #'(begin
+                               (let ([a 1][a2 1]) . rst))))])))))))
+     
+     (build-test 
+      (string-append
+       "#lang racket/base\n"
+       "(require \"n.rkt\")\n"
+       "(n e\n"
+       "   e_11111111111111\n"
+       "   e e e\n"
+       "   e_11111111111111 e_11111111111111)\n")
+      '(("#lang racket/base\n(" default-color)
+        ("require" imported)
+        (" \"n.rkt\")\n(" default-color)
+        ("n" imported)
+        (" " default-color)
+        ("e" lexically-bound)
+        ("\n   " default-color)
+        ("e_11111111111111" lexically-bound)
+        ("\n   " default-color)
+        ("e" lexically-bound)
+        (" " default-color)
+        ("e" lexically-bound)
+        (" " default-color)
+        ("e" lexically-bound)
+        ("\n   " default-color)
+        ("e_11111111111111" lexically-bound)
+        (" " default-color)
+        ("e_11111111111111" lexically-bound)
+        (")\n" default-color))
+      (list '((6 17) (19 26))
+            '((27 34) (37 38))
+            '((39 40) (44 45) (64 65) (66 67) (68 69) (73 74) (90 91))
+            '((44 60) (73 89) (90 106)))
+      #:extra-files
+      (hash
+       "n.rkt"
+       (with-output-to-string
+         (λ ()
+           (printf "#lang racket/base\n")
+           (pretty-write '(require (for-syntax racket/base)))
+           (pretty-write '(provide n))
+           (pretty-write
+            '(define-syntax (n stx)
+               (syntax-case stx ()
+                 [(_ b1 b2 . rst)
+                  (let ()
+                    (define str (regexp-replace #rx"-.*$" (symbol->string (syntax-e #'a)) ""))
+                    #`(let ([b1 1]
+                            [b2 1])
+                        #,(datum->syntax #'b1
+                                         (syntax-e #'b1)
+                                         (vector (syntax-source #'b2)
+                                                 (syntax-line #'b2)
+                                                 (syntax-column #'b2)
+                                                 (syntax-position #'b2)
+                                                 (string-length (symbol->string (syntax-e #'b1))))
+                                         #'b1)
+                        (let-syntax ([b2 (λ (x)
+                                           (unless (identifier? x)
+                                             (raise-syntax-error 'b2 "only ids"))
+                                           (datum->syntax 
+                                            x
+                                            'b1
+                                            (vector (syntax-source x)
+                                                    (syntax-line x)
+                                                    (syntax-column x)
+                                                    (syntax-position x)
+                                                    (string-length (symbol->string 'b1)))
+                                            x))])
+                          . 
+                          rst)))])))))))
+
+     (build-prefix-test "(module m racket/base (require racket/list) first)"
+                        32
+                        "x."
+                        "(module m racket/base (require (prefix-in x. racket/list)) x.first)")
+     (build-prefix-test "(module m racket/base (require racket/list) first)"
+                        45
+                        "x."
+                        "(module m racket/base (require (prefix-in x. racket/list)) x.first)")
+     (build-prefix-test "(module m racket/base (require racket/list) first)"
+                        48
+                        "🏴‍☠️."
+                        "(module m racket/base (require (prefix-in 🏴‍☠️. racket/list)) 🏴‍☠️.first)")
+     
+     (build-rename-test "(lambda (x) x)"
+                        9
+                        "x"
+                        "y"
+                        "(lambda (y) y)")
+     (build-rename-test "(lambda (x) x)"
+                        9
+                        "x"
+                        "🏴‍☠️"
+                        "(lambda (🏴‍☠️) 🏴‍☠️)")
+     (build-rename-test "(lambda (🏴‍☠️) 🏴‍☠️)"
+                        9
+                        "🏴‍☠️"
+                        "y"
+                        "(lambda (y) y)")
+     (build-rename-test "(lambda (x) x)"
+                        9
+                        "x"
+                        "yy"
+                        "(lambda (yy) yy)")
+     
+     (build-rename-test "(lambda (x) x)"
+                        9
+                        "x"
+                        "yxy"
+                        "(lambda (yxy) yxy)")
+     (build-rename-test "(lambda (x) x x)"
+                        9
+                        "x"
+                        "yxy"
+                        "(lambda (yxy) yxy yxy)")
+     (build-rename-test "(lambda (x) x x)"
+                        12
+                        "x"
+                        "yxy"
+                        "(lambda (yxy) yxy yxy)")
+     (build-rename-test "(lambda (x) x x)"
+                        14
+                        "x"
+                        "yxy"
+                        "(lambda (yxy) yxy yxy)")
+     
+     (build-rename-test "(define-syntax-rule (m x y) (λ (x) x y))(m z z)"
+                        43
+                        "z"
+                        "qq"
+                        "(define-syntax-rule (m x y) (λ (x) x y))(m qq qq)")
+     
+     (build-rename-test (string-append
+                         "#lang racket/base\n"
+                         "(require (for-syntax racket/base))\n"
+                         "(define-syntax-rule (m x)\n"
+                         "  (begin (λ (x) x) (define x 1) (λ (x) x)))\n"
+                         "(m x)\n"
+                         "x\n")
+                        126
+                        "x"
+                        "y"
+                        (string-append
+                         "#lang racket/base\n"
+                         "(require (for-syntax racket/base))\n"
+                         "(define-syntax-rule (m x)\n"
+                         "  (begin (λ (x) x) (define x 1) (λ (x) x)))\n"
+                         "(m y)\n"
+                         "y\n"))
+     
+     (build-rename-test (string-append
+                         "#lang racket"
+                         "\n"
+                         "(define player%\n"
+                         " (class object%\n"
+                         "   (init-field strategy player# tiles)\n"
+                         "   (field [score (set)])\n"
+                         "\n"
+                         "   (super-new)\n"
+                         "\n"
+                         "   (define/private (put t pl)\n"
+                         "     (set! tiles(remove t tiles)))))\n")
+                        80
+                        "tiles"
+                        "*tiles"
+                        (string-append
+                         "#lang racket"
+                         "\n"
+                         "(define player%\n"
+                         " (class object%\n"
+                         "   (init-field strategy player# *tiles)\n"
+                         "   (field [score (set)])\n"
+                         "\n"
+                         "   (super-new)\n"
+                         "\n"
+                         "   (define/private (put t pl)\n"
+                         "     (set! *tiles(remove t *tiles)))))\n"))
+     
+     (build-rename-test (string-append
+                         "#lang racket"
+                         "\n"
+                         "(define player%\n"
+                         " (class object%\n"
+                         "   (init-field strategy player# *tiles)\n"
+                         "   (field [score (set)])\n"
+                         "\n"
+                         "   (super-new)\n"
+                         "\n"
+                         "   (define/private (put t pl)\n"
+                         "     (set! *tiles(remove t *tiles)))))\n")
+                        80
+                        "*tiles"
+                        "tiles"
+                        (string-append
+                         "#lang racket"
+                         "\n"
+                         "(define player%\n"
+                         " (class object%\n"
+                         "   (init-field strategy player# tiles)\n"
+                         "   (field [score (set)])\n"
+                         "\n"
+                         "   (super-new)\n"
+                         "\n"
+                         "   (define/private (put t pl)\n"
+                         "     (set! tiles(remove t tiles)))))\n"))
+     
+     (build-rename-test 
+      (string-append
+       "#lang racket/base\n"
+       "(define (f y)\n"
+       "  y y y y y y y y y y y y y y y y y y y y y y y y\n"
+       "  y y y y y y y y y y y y y y y y y y y y y y y y\n"
+       "  y y y y y y y y y y y y y y y y y y y y y y y y\n"
+       "  y y y y y y y y y y y y y y y y y y y y y y y y\n"
+       "  y y y y y y y y y y y y y y y y y y y y y y y y\n"
+       "  y y y y y y y y y y y y y y y y y y y y y y y y\n"
+       "  y y y y y y y y y y y y y y y y y y y y y y y y\n"
+       "  y y y y y y y y y y y y y y y y y y y y y y y y)\n")
+      29
+      "y"
+      "x"
+      (string-append
+       "#lang racket/base\n"
+       "(define (f x)\n"
+       "  x x x x x x x x x x x x x x x x x x x x x x x x\n"
+       "  x x x x x x x x x x x x x x x x x x x x x x x x\n"
+       "  x x x x x x x x x x x x x x x x x x x x x x x x\n"
+       "  x x x x x x x x x x x x x x x x x x x x x x x x\n"
+       "  x x x x x x x x x x x x x x x x x x x x x x x x\n"
+       "  x x x x x x x x x x x x x x x x x x x x x x x x\n"
+       "  x x x x x x x x x x x x x x x x x x x x x x x x\n"
+       "  x x x x x x x x x x x x x x x x x x x x x x x x)\n"))
+     (build-rename-test
+      (string-append
+       "#lang racket\n"
+       "(let ([x 1])\n"
+       "  x`1\n"
+       "  `2)\n")
+      20
+      "x"
+      "y"
+      (string-append
+       "#lang racket\n"
+       "(let ([y 1])\n"
+       "  y`1\n"
+       "  `2)\n"))
+
+     (build-rename-test
+      (string-append
+       "#lang racket\n"
+       "(define cons 5)\n"
+       "(quote-syntax cons)\n"
+       "(define-syntax x #f)\n")
+      44
+      "cons"
+      "abc"
+      (string-append
+       "#lang racket\n"
+       "(define abc 5)\n"
+       "(quote-syntax abc)\n"
+       "(define-syntax x #f)\n"))
+
+     (build-rename-test
+      (string-append
+       "#lang racket\n"
+       "(require (rename-in racket/base [cons abcdef]))\n"
+       "abcdef")
+      62
+      "abcdef"
+      "xyz"
+      (string-append
+       "#lang racket\n"
+       "(require (rename-in racket/base [cons xyz]))\n"
+       "xyz"))
+
+     (build-test
+      #:extra-files
+      (hash "define-suffix.rkt"
+            (string-append
+             "#lang racket/base\n"
+             "(require (for-syntax racket/base))\n"
+             "(provide define/suffix)\n"
+             "(define-syntax (define/suffix stx)\n"
+             "  (syntax-case stx ()\n"
+             "    [(_ x)\n"
+             "     (let ()\n"
+             "       (define x-str (symbol->string (syntax-e #'x)))\n"
+             "       (define x-len (string-length x-str))\n"
+             "       (define x-s (datum->syntax #'x (string->symbol\n"
+             "                                       (string-append x-str \"-suffix\"))))\n"
+             "       (define prop (vector (syntax-local-introduce x-s) 0 x-len 0.5 0.5\n"
+             "                            (syntax-local-introduce #'x) 0 x-len 0.5 0.5))\n"
+             "       (define x-s* (syntax-property x-s 'sub-range-binders prop))\n"
+             "       #`(define-syntax-rule (#,x-s*) (void)))]))\n"))
+      (string-append "#lang racket/base\n"
+                     "(require \"define-suffix.rkt\")\n"
+                     "(define/suffix foo)\n"
+                     "(foo-suffix)\n"
+                     "(let ()\n"
+                     "  (define/suffix bar)\n"
+                     "  (bar-suffix))\n")
+      '(("#lang racket/base\n(" default-color)
+        ("require" imported)
+        (" \"define-suffix.rkt\")\n(" default-color)
+        ("define/suffix" imported)
+        (" foo)\n(" default-color)
+        ("foo-suffix" lexically-bound)
+        (")\n(" default-color)
+        ("let" imported)
+        (" ()\n  (" default-color)
+        ("define/suffix" imported)
+        (" bar)\n  (" default-color)
+        ("bar-suffix" lexically-bound)
+        ("))\n" default-color))
+      (list '((6 17) (19 26) (82 85))
+            '((27 46) (49 62) (92 105))
+            '((63 66) (69 72))
+            '((106 109) (114 117))))
+
+     (build-test
+      #:extra-files
+      (hash "m.rkt"
+            (string-append
+             "#lang racket/base\n"
+             "(require (for-syntax racket/base))\n"
+             "(provide m)\n"
+             "(define-syntax (m stx)\n"
+             "  (syntax-case stx ()\n"
+             "    [(_ binder use)\n"
+             "     (let ()\n"
+             "       (define binder-str (symbol->string (syntax-e #'binder)))\n"
+             "       (define binder-len (string-length binder-str))\n"
+             "       (define binder*-str (string-append binder-str \"-suffix\"))\n"
+             "       (define binder* (datum->syntax #'binder (string->symbol binder*-str)))\n"
+             "       (define prop (vector (syntax-local-introduce binder*) 0 binder-len 0.5 0.5\n"
+             "                            (syntax-local-introduce #'binder) 0 binder-len 0.5 0.5))\n"
+             "       (define use* (syntax-property #'use 'sub-range-binders prop))\n"
+             "       (syntax-property\n"
+             "        (syntax-property #'(void) 'disappeared-use (syntax-local-introduce use*))\n"
+             "        'disappeared-binding (syntax-local-introduce binder*)))]))\n"))
+      (string-append "#lang racket/base\n"
+                     "(require \"m.rkt\")\n"
+                     "(m foo foo-suffix)\n")
+      '(("#lang racket/base\n(" default-color)
+        ("require" imported)
+        (" \"m.rkt\")\n(" default-color)
+        ("m" imported)
+        (" foo " default-color)
+        ("foo-suffix" lexically-bound)
+        (")\n" default-color))
+      (list '((6 17) (19 26))
+            '((27 34) (37 38))
+            '((39 42) (43 46))))
+
+     (build-err-test "(module m racket/base free-var)" #rx"free-var: unbound"
+                     (set (list 23 8)))
+     (build-err-test "#|🏴‍☠️|#(module m racket/base free-var)" #rx"free-var: unbound"
+                     (set (list 31 8)))
+
+     (build-test
+      #:extra-files
+      (hash "mouse-over-tooltips.rkt"
+            (with-output-to-string
+              (λ ()
+                (displayln "#lang racket/base")
+                (writeln '(require (for-syntax racket/base)))
+                (pretty-write
+                 '(define-syntax (char-span-bad-source stx)
+                    (syntax-case stx ()
+                      [(_ a)
+                       (syntax-property
+                        #'a
+                        'mouse-over-tooltips
+                        (vector
+                         (datum->syntax stx
+                                        (syntax-e stx)
+                                        (vector
+                                         "/file/that/does/not/exist.rkt"
+                                         (syntax-line stx)
+                                         (syntax-column stx)
+                                         (syntax-position stx)
+                                         (syntax-span stx))
+                                        stx)
+                         (sub1 (syntax-position stx))
+                         (sub1 (+ (syntax-position stx)
+                                  (syntax-span stx)))
+                         (format "this expression\nspans ~a chars"
+                                 (syntax-span stx))))])))
+                (write `(provide char-span-bad-source)))))
+      (string-append "#lang racket/base\n"
+                     "(require \"mouse-over-tooltips.rkt\")\n"
+                     "(char-span-bad-source 12345)\n")
+      '(("#lang racket/base\n(" default-color)
+        ("require" imported)
+        (" \"mouse-over-tooltips.rkt\")\n(" default-color)
+        ("char-span-bad-source" imported)
+        (" 12345)\n" default-color))
+      (list '((6 17) (19 26) (76 76))
+            '((27 52) (55 75))))
+     ))
+
+
+  (define (main)
+    (define temp-dir (normalize-path (make-temporary-directory "syncheck-test~a")))
+    (dynamic-wind
+     void
+     (λ ()
+       (call-with-input-file (collection-file-path "list.rkt" "racket")
+         (λ (in-port)
+           (call-with-output-file (build-path temp-dir "list.rkt")
+             (λ (out-port)
+               (copy-port in-port out-port)))))
+       (fire-up-drracket-and-run-tests
+        (λ ()
+          (define drs (wait-for-drracket-frame))
+          ;(set-language-level! (list "Pretty Big"))
+          (begin
+            (set-language-level! (list "Pretty Big") #f)
+            (test:set-radio-box-item! "No debugging or profiling")
+            (let ([f (test:get-active-top-level-window)])
+              (test:button-push "OK")
+              (wait-for-new-frame f)))
+          (do-execute drs)
+          (define defs (queue-callback/res (λ () (send drs get-definitions-text))))
+          (define filename (make-temporary-file "syncheck-test~a" #f temp-dir))
+          (queue-callback/res (λ () (send defs save-file filename)))
+          (preferences:set 'framework:coloring-active #f)
+          (close-the-error-window-test drs)
+          (for-each (run-one-test temp-dir) tests)
+          (preferences:set 'framework:coloring-active #t)
+          (queue-callback/res (λ ()
+                                (send defs save-file) ;; clear out autosave
+                                (send defs set-filename #f)))
+          (delete-file filename)
+          
+          (printf "Ran ~a tests.\n" total-tests-run))))
+     (λ () (delete-directory/files temp-dir))))
+  
+  (define (close-the-error-window-test drs)
+    (clear-definitions drs)
+    (insert-in-definitions drs "(")
+    (click-check-syntax-button drs #f)
+    (wait-for-computation drs)
+    (unless (queue-callback/res (λ () (send drs syncheck:error-report-visible?)))
+      (error 'close-the-error-window-test "error report window never appeared"))
+    (do-execute drs)
+    (when (queue-callback/res (λ () (send drs syncheck:error-report-visible?)))
+      (error 'close-the-error-window-test "error report window did not go away after clicking Run")))
+    
+  (define total-tests-run 0)
+  
+  (define ((run-one-test save-dir) test)
+    (set! total-tests-run (+ total-tests-run 1))
+    (let* ([drs (wait-for-drracket-frame)]
+           [defs (queue-callback/res (λ () (send drs get-definitions-text)))])
+      (clear-definitions drs)
+      (cond
+        [(test? test)
+         (let ([pre-input (test-input test)]
+               [expected (test-expected test)]
+               [arrows (test-arrows test)]
+               [tooltips (test-tooltips test)]
+               [relative "list.rkt"]
+               [setup (test-setup test)]
+               [teardown (test-teardown test)]
+               [extra-files (test-extra-files test)]
+               [extra-info? (test-extra-info? test)])
+           (define extra-file-paths
+             (for/list ([(name contents) (in-hash extra-files)])
+               (define path (build-path save-dir name))
+               (display-to-file contents path #:mode 'text)
+               path))
+
+           (define setup-result (setup))
+           (define input (if (procedure? pre-input)
+                             (pre-input setup-result)
+                             pre-input))
+           (cond
+             [(dir-test? test)
+              (insert-in-definitions drs (format input (path->require-string relative)))]
+             [else (insert-in-definitions drs input)])
+           (click-check-syntax-and-check-errors drs test extra-info?)
+           
+           ;; need to check for syntax error here
+           (let ([got (get-annotated-output drs)]
+                 [got-arrows (queue-callback/res (λ () (send defs syncheck:get-bindings-table)))])
+             (when extra-info?
+               (printf "got-arrows\n")
+               (pretty-print got-arrows)
+               (newline)
+               
+               (printf "'drracket:syncheck:show-arrows? ~s\n"
+                       (preferences:get 'drracket:syncheck:show-arrows?)))
+             (compare-output (cond
+                               [(dir-test? test)
+                                (map (lambda (x)
+                                       (list (if (eq? (car x) 'relative-path)
+                                                 (path->require-string relative)
+                                                 (car x))
+                                             (cadr x)))
+                                     expected)]
+                               [else
+                                expected])
+                             got
+                             arrows 
+                             got-arrows
+                             input
+                             (test-line test)))
+           (when tooltips
+             (compare-tooltips (queue-callback/res (λ () (send defs syncheck:get-bindings-table #t)))
+                               tooltips
+                               (test-line test)))
+           
+           (teardown setup-result)
+           (for-each delete-directory/files extra-file-paths))]
+        [(rename-test? test)
+         (insert-in-definitions drs (rename-test-input test))
+         (click-check-syntax-and-check-errors drs test #f)
+         (define menu-item
+           (queue-callback/res
+            (λ ()
+              (define defs (send drs get-definitions-text))
+              (define menu (make-object popup-menu%))
+              (send defs syncheck:build-popup-menu menu (rename-test-pos test) defs)
+              (define item-name (format "Rename ~a" (rename-test-old-name test)))
+              (define menu-item
+                (for/or ([x (in-list (send menu get-items))])
+                  (and (is-a? x labelled-menu-item<%>)
+                       (equal? (send x get-label) item-name)
+                       x)))
+              (cond
+                [menu-item
+                 menu-item]
+                [else
+                 (eprintf "syncheck-test.rkt: rename test ~s didn't find menu item named ~s in ~s\n"
+                          test
+                          item-name
+                          (map (λ (x) (and (is-a? x labelled-menu-item<%>) (send x get-label)))
+                               (send menu get-items)))
+                 #f]))))
+         (when (and menu-item (rename-test-new-name test) (rename-test-output test))
+           (queue-callback (λ () (send menu-item command (make-object control-event% 'menu))))
+           (wait-for-new-frame drs)
+           (for ([x (in-string (rename-test-new-name test))])
+             (test:keystroke x))
+           (test:button-push "OK")
+           (define result
+             (queue-callback/res (λ () 
+                                   (define defs (send drs get-definitions-text))
+                                   (send defs get-text 0 (send defs last-position)))))
+           (unless (equal? result (rename-test-output test))
+             (eprintf "syncheck-test.rkt FAILED\n   test ~s\n  got ~s\n" 
+                      test
+                      result)))]
+        [(prefix-test? test)
+         (insert-in-definitions drs (prefix-test-input test))
+         (click-check-syntax-and-check-errors drs test #f)
+         (define menu-item
+           (queue-callback/res
+            (λ ()
+              (define defs (send drs get-definitions-text))
+              (define menu (make-object popup-menu%))
+              (send defs syncheck:build-popup-menu menu (prefix-test-pos test) defs)
+              (define item-name "Add Require Prefix")
+              (define menu-item
+                (for/or ([x (in-list (send menu get-items))])
+                  (and (is-a? x labelled-menu-item<%>)
+                       (equal? (send x get-label) item-name)
+                       x)))
+              (cond
+                [menu-item
+                 menu-item]
+                [else
+                 (eprintf "syncheck-test.rkt: prefix test ~s didn't find menu item named ~s in ~s\n"
+                          test
+                          item-name
+                          (map (λ (x) (and (is-a? x labelled-menu-item<%>) (send x get-label)))
+                               (send menu get-items)))
+                 #f]))))
+         (when menu-item
+           (queue-callback (λ () (send menu-item command (make-object control-event% 'menu))))
+           (wait-for-new-frame drs)
+           (for ([x (in-string (prefix-test-prefix test))])
+             (test:keystroke x))
+           (test:button-push "OK")
+           (define result
+             (queue-callback/res (λ () 
+                                   (define defs (send drs get-definitions-text))
+                                   (send defs get-text 0 (send defs last-position)))))
+           (unless (equal? result (prefix-test-output test))
+             (eprintf "syncheck-test.rkt FAILED\n   test ~s\n  got ~s\n" 
+                      test
+                      result)))]
+        [(err-test? test)
+         (let/ec done
+           (insert-in-definitions drs (err-test-input test))
+           (define err (click-check-syntax-and-check-errors drs test #f #:err-ok? #t))
+           (unless err
+             (eprintf "syncheck-test.rkt FAILED\n   test ~s\n   didn't get an error\n"
+                      test)
+             (done))
+           (define expected (err-test-expected test))
+           (define message-good?
+             (cond
+               [(string? expected)
+                (equal? expected err)]
+               [else
+                (regexp-match? expected err)]))
+           (unless message-good?
+             (eprintf "syncheck-test.rkt FAILED error doesn't match\n   test ~s\n   ~s\n"
+                      test
+                      err)
+             (done))
+           (define srclocs (queue-callback/res (λ () (send (send drs get-interactions-text) get-error-ranges))))
+           (define actual
+             (for/set ([srcloc (in-list srclocs)])
+               (list (srcloc-position srcloc)
+                     (srcloc-span srcloc))))
+           (unless (equal? actual (err-test-locations test))
+             (eprintf "syncheck-test.rkt FAILED srclocs don't match\n   test ~s\n   actual ~s\n   got    ~s\n"
+                      test
+                      actual
+                      (err-test-locations test)))
+           (void))])))
+  
+  (define (path->require-string relative)
+    (define (p->string p)
+      (cond
+        [(eq? p 'up) ".."]
+        [else (path->string p)]))
+    (apply string-append (add-between (map p->string (explode-path relative)) "/"))) 
+  
+  
+  (define remappings
+    '((constant default-color)
+      (imported-syntax imported)
+      (imported-variable imported)
+      (lexically-bound-syntax lexically-bound)
+      (lexically-bound-variable lexically-bound)))
+  
+  (define (collapse-and-rename expected)
+    (define renamed
+      (map (lambda (ent)
+             (let* ([str (car ent)]
+                    [id (cadr ent)]
+                    [matches (assoc id remappings)])
+               (if matches
+                   (list str (cadr matches))
+                   ent)))
+           expected))
+    (let loop ([ids renamed])
+      (cond
+        [(null? ids) null]
+        [(null? (cdr ids)) ids]
+        [else
+         (let ([fst (car ids)]
+               [snd (cadr ids)])
+           (if (eq? (cadr fst) (cadr snd))
+               (loop (cons (list (string-append (car fst) (car snd)) (cadr fst)) (cddr ids)))
+               (cons fst (loop (cdr ids)))))])))
+    
+  ;; compare-arrows : expression
+  ;;                  (or/c #f (listof (cons (list number-or-proc number-or-proc)
+  ;;                                         (listof (list number-or-proc number-or-proc)))))
+  ;;                  hash-table[(list text number number) -o> (setof (list text number number))]
+  ;;               -> void
+  (define (compare-arrows test-exp raw-expected raw-actual line)
+    (when raw-expected
+      ;; convert the number-or-proc's in raw-expected to be just numbers
+      (define expected 
+        (let loop ([stuff raw-expected])
+          (cond
+            [(list? stuff)
+             (for/list ([ele (in-list stuff)])
+               (loop ele))]
+            [(procedure? stuff)
+             (stuff (string-length test-exp))]
+            [else
+             stuff])))
+      (define already-checked (make-hash))
+      
+      (define actual-ht (make-hash))
+      (for ([(k v) (in-hash raw-actual)])
+        (hash-set! actual-ht (cdr k)
+                   (sort (map cdr (set->list v)) < #:key car)))
+      (define expected-ht (make-hash))
+      (for ([binding (in-list expected)])
+        (hash-set! expected-ht (car binding) (cdr binding)))
+      ;; binding-in-ht? : hash-table (list number number) (listof (list number number)) -> boolean
+      (define (test-binding expected? ht) ;; dont-care
+        (lambda (pr)
+          (define frm (car pr))
+          (define to (cdr pr))
+          (hash-ref
+           already-checked
+           frm
+           (lambda ()
+             (hash-set! already-checked frm #t)
+             (define ht-ent (hash-ref ht frm 'nothing-there))
+             (unless (equal? ht-ent to)
+               (eprintf (if expected?
+                            "FAILED arrow test line ~a ~s from ~s\n  expected ~s\n    actual ~s\n"
+                            "FAILED arrow test line ~a ~s from ~s\n    actual ~s\n  expected ~s\n")
+                        line
+                        test-exp
+                        frm
+                        ht-ent
+                        to))))))
+        
+      (for-each (test-binding #t expected-ht) (hash-map actual-ht cons))
+      (for-each (test-binding #f actual-ht) (hash-map expected-ht cons))))
+  
+  (define (compare-output raw-expected got arrows arrows-got input line)
+    (let ([expected (collapse-and-rename raw-expected)])
+      (cond
+        [(not-matching-colors got expected)
+         =>
+         (λ (msg)
+           (eprintf "FAILED line ~a: ~s\n      expected: ~s\n           got: ~s\n   ~a\n"
+                    line input expected got msg))]
+        [else
+         (compare-arrows input arrows arrows-got line)])))
+  
+  (define (not-matching-colors got expected)
+    (let loop ([got got]
+               [expected expected]
+               [i 0])
+      (cond
+        [(and (pair? got) (pair? expected))
+         (or (not-matching-single-color i (car got) (car expected))
+             (loop (cdr got) (cdr expected) (+ i 1)))]
+        [(and (null? got) (null? expected))
+         #f]
+        [else
+         (format "lengths different by ~a" (abs (- (length got) (length expected))))])))
+  
+  (define (not-matching-single-color i got expected)
+    (define got-str (list-ref got 0))
+    (define got-color (list-ref got 1))
+    (define exp-str (list-ref expected 0))
+    (define exp-color (list-ref expected 1))
+    (or (cond
+          [(string? exp-str)
+           (if (equal? got-str exp-str)
+               #f
+               (format "strings at position ~a do not match; got ~s, expected ~s"
+                       i got-str exp-str))]
+          [(regexp? exp-str)
+           (if (regexp-match? exp-str got-str)
+               #f
+               (format "regexp at position ~a (~s) does not match actual string: ~s"
+                       i exp-str got-str))])
+        (if (equal? got-color exp-color)
+            #f
+            (format "colors at position ~a do not match; got ~s, expected ~s"
+                    i got-color exp-color))))
+  
+  (define (compare-tooltips got expected line)
+    (unless (equal? got expected)
+      (eprintf "FAILED TOOLTIPS: line ~s \n      expected: ~s\n           got: ~s\n"
+               line expected got)))
+  
+  ;; get-annotate-output : drscheme-frame -> (listof str/ann)
+  (define (get-annotated-output drs)
+    (queue-callback/res (λ () (get-string/style-desc (send drs get-definitions-text)))))
+  
+  (define (click-check-syntax-and-check-errors drs test extra-info? #:err-ok? [err-ok? #f])
+    (click-check-syntax-button drs extra-info?)
+    (wait-for-computation drs)
+    (when (queue-callback/res (λ () (send (send drs get-definitions-text) in-edit-sequence?)))
+      (error 'syncheck-test.rkt "still in edit sequence for ~s" test))
+
+    (define err (queue-callback/res (λ () (send drs syncheck:get-error-report-contents))))
+    (cond
+      [err-ok?
+       err]
+      [else
+       (when err
+         (eprintf "FAILED ~s\n   error report window is visible:\n   ~a\n"
+                  test
+                  err))]))
+  
+  (define (click-check-syntax-button drs extra-info?)
+    (test:run-one (lambda () (send drs syncheck:button-callback #:print-extra-info? extra-info?))))
+
+(main)
+
+(module+ test
+  (module config info
+    (define timeout 200)))

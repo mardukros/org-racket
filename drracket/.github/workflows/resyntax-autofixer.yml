@@ -1,0 +1,36 @@
+name: Resyntax Autofixer
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 0"
+
+jobs:
+  autofix:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'racket'
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3.6.0
+      - name: Install Racket
+        uses: Bogdanp/setup-racket@v1.9.1
+        with:
+          version: current
+          local_catalogs: $GITHUB_WORKSPACE
+          dest: '"${HOME}/racketdist-current-CS"'
+          sudo: never
+      - name: Register local packages
+        run: |
+          raco pkg install -i --auto --no-setup --skip-installed drracket-test drracket-tool-test
+          raco pkg update --auto --no-setup drracket drracket-test drracket-tool drracket-tool-test drracket-tool-lib drracket-tool-doc drracket-plugin-lib
+      - name: Install local packages
+        run: raco setup --pkgs drracket drracket-test drracket-tool drracket-tool-test drracket-tool-lib drracket-tool-doc drracket-plugin-lib
+      - name: Create a Resyntax pull request
+        uses: jackfirth/create-resyntax-pull-request@v0.5.1
+        with:
+          private-key: ${{ secrets.RESYNTAX_APP_PRIVATE_KEY }}

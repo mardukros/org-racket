@@ -1,0 +1,54 @@
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+name: CI
+jobs:
+  build:
+    name: Racket ${{ matrix.racket-variant }} - ${{ matrix.enable-contracts && 'Contracts Enabled' || 'Contracts Disabled' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        racket-variant: ["CS"]
+        enable-contracts: [true, false]
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: Bogdanp/setup-racket@v1.13
+        with:
+          architecture: x64
+          distribution: full
+          variant: ${{ matrix.racket-variant }}
+          version: current
+          dest: '"${HOME}/racketdist-${{ matrix.racket-variant }}"'
+          local_catalogs: $GITHUB_WORKSPACE
+          sudo: never
+      - name: Check Racket version
+        run: racket -v
+      - name: Register local packages
+        run: |
+          raco pkg install -i --auto --no-setup --skip-installed typed-racket-test
+          raco pkg update --auto --no-setup source-syntax typed-racket-lib typed-racket-more typed-racket-compatibility typed-racket-doc typed-racket typed-racket-test
+      - run: raco setup --check-pkg-deps typed typed-racket typed-racket-test typed-scheme
+        env:
+          PLT_TR_CONTRACTS: ${{ matrix.enable-contracts }}
+      - run: racket -l typed-racket-test -- --unit
+      - run: racket -l typed-racket-test -- --int
+      - run: racket -l typed-racket-test -- --just typed-racket-test/succeed/cl.rkt
+      - run: xvfb-run racket -l typed-racket-test -- --guitests
+        if: ${{ !matrix.enable-contracts }}
+      - run: racket -l typed-racket-test -- --opt
+        if: ${{ !matrix.enable-contracts }}
+      - run: racket -l typed-racket-test -- --missed-opt
+        if: ${{ !matrix.enable-contracts }}
+      - run: raco test -em typed-racket-test/test-docs-complete.rkt
+        if: ${{ !matrix.enable-contracts }}
+      - run: raco setup plot math
+      - run: racket -l typed-racket-test -- --external
+      - run: raco make typed-racket-test/external/historical-counterexamples.rkt
+      - run: racket -l typed-racket-test/external/historical-counterexamples
+        if: ${{ !matrix.enable-contracts }}
+      - run: racket -l typed-racket-test/external/tr-random-testing
+        if: ${{ !matrix.enable-contracts }}

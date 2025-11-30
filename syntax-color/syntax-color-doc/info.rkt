@@ -1,0 +1,19 @@
+#lang info
+
+(define collection 'multi)
+
+(define build-deps '("gui-doc"
+                     "scribble-doc"
+                     "gui-lib"
+                     "scribble-lib"
+                     "racket-doc"
+                     "syntax-color-lib"))
+(define deps '("base"))
+(define update-implies '("syntax-color-lib"))
+
+(define pkg-desc "documentation part of \"syntax-color\"")
+
+(define pkg-authors '(mflatt))
+
+(define license
+  '(Apache-2.0 OR MIT))

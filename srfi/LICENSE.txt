@@ -1,0 +1,28 @@
+This component of Racket is under the
+Apache 2.0 and MIT licenses. The user can choose the license under
+which they will be using the software.
+
+See the files
+  https://github.com/racket/racket/blob/master/racket/src/LICENSE-APACHE.txt
+and
+  https://github.com/racket/racket/blob/master/racket/src/LICENSE-MIT.txt
+for the full text of the licenses.
+
+Additionally, this repository includes the source for implementations
+of Scheme Requests For Implementation taken from the reference
+implementations provided by the authors of those SRFIs, as well as the
+SRFI documents themselves.
+
+All of the implementations are distributed under free software
+licenses, however, for the specific license please see the individual
+files in this repository. Other source code is distributed under
+Apache 2.0 and MIT licenses.
+
+With the exceptions listed below, the documents are also distributed
+under free software licenses.
+
+The "srfi-doc-nonfree" package contains the source of the SRFI 5 document,
+which has a restrictive licenses. See the file:
+  srfi-doc-nonfree/srfi/scribblings/srfi-std/srfi-5.html
+for the specific license. The implementation of `srfi/5` found in this
+repository (in the "srfi-lib" package) is not restrictively licensed.

@@ -1,0 +1,61 @@
+on: [push, pull_request]
+name: CI
+jobs:
+  build:
+    name: "Build on Racket '${{ matrix.racket-version }}' (${{ matrix.racket-variant }})"
+    runs-on: ubuntu-latest
+    strategy:
+      # Let all jobs run to completion -- this will allow us to determine if
+      # the failure is specific to a Racket version.
+      fail-fast: false
+      matrix:
+        racket-version: ["8.9", "current"]
+        racket-variant: ["BC", "CS"]
+    steps:
+      - uses: actions/checkout@v3.3.0
+      - uses: Bogdanp/setup-racket@v1.10
+        with:
+          architecture: x64
+          distribution: minimal
+          variant: ${{ matrix.racket-variant }}
+          version: ${{ matrix.racket-version }}
+          dest: '${HOME}/racket'
+          sudo: never
+
+      # Setup this source repository as a package catalog which has higher
+      # priority than the main catalog
+
+      - run: ${HOME}/racket/bin/racket -l- pkg/dirs-catalog --link catalog .
+      - run: echo "file://`pwd`/catalog" > catalogs.txt
+      - run: ${HOME}/racket/bin/raco pkg config catalogs >> catalogs.txt
+      - run: ${HOME}/racket/bin/raco pkg config --set catalogs `cat catalogs.txt`
+      - run: ${HOME}/racket/bin/raco pkg config catalogs
+
+      # Install plot and its dependencies.  Since we installed minimal racket,
+      # this will fetch most of the packages from the main package catalog,
+      # except for the packages inside this directory, which have higher
+      # priority.
+
+      - run: ${HOME}/racket/bin/raco pkg install --batch --auto plot
+
+      # This runs any tests inside the plot, plot-lib, plot-gui-lib and
+      # plot-doc packages, but NOT the plot-test package.  The actual tests
+      # are in the `plot-test` package, so we don't expect any tests here, but
+      # just in case someone wrote a test module...
+
+      - run: xvfb-run ${HOME}/racket/bin/raco test --deps --package plot
+
+      # Install the plot-test package and run the tests
+        
+      - run: ${HOME}/racket/bin/raco pkg install --batch --auto plot-test
+      - run: xvfb-run ${HOME}/racket/bin/raco test --package plot-test
+
+      # If any of the plot-test tests failed, they will generate new draw step
+      # files and sample images.  Upload these as an Github Actions Artifact,
+      # so they can be inspected by the developer.
+      
+      - uses: actions/upload-artifact@v3.1.2
+        if: failure()
+        with:
+          name: New Test Data Files ${{ matrix.racket-version }} ${{ matrix.racket-variant }}
+          path: plot-test/plot/tests/**/test-data/new-*
