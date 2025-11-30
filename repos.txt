@@ -1,0 +1,33 @@
+# Configuration for racket org repository integration
+# Format: owner/repo-name
+
+# Core repositories
+racket/racket
+racket/typed-racket
+racket/drracket
+
+# Development tools
+racket/redex
+racket/scribble
+
+# Libraries
+racket/plot
+racket/rackunit
+racket/data
+racket/games
+racket/htdp
+racket/images
+racket/math
+racket/net
+racket/pict
+racket/r6rs
+racket/realm
+racket/shell-completion
+racket/srfi
+racket/string-constants
+racket/swindle
+racket/syntax-color
+racket/trace
+racket/unix-socket
+racket/web-server
+racket/wxme
